@@ -1,0 +1,119 @@
+import streamlit as st
+import pandas as pd
+import io # مكتبة للتعامل مع الملفات في الذاكرة
+
+# --- 1. إعداد الصفحة ---
+st.set_page_config(page_title="نظام توزيع التكاليف", layout="wide")
+st.title("🚀 نظام احتساب تكاليف الموظفين وتوزيعها")
+
+# --- 2. واجهة رفع الملفات ---
+st.header("الخطوة 1: ارفع ملفات الإكسل (CSV)")
+
+# وضع 3 أعمدة لرفع الملفات
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    file_employees = st.file_uploader("1. ارفع ملف الموظفين (employees.csv)", type="csv")
+
+with col2:
+    file_allocations = st.file_uploader("2. ارفع ملف التوزيع (allocations.csv)", type="csv")
+
+with col3:
+    file_attendance = st.file_uploader("3. ارفع ملف الحضور (attendance.csv)", type="csv")
+
+
+# --- 3. المعالجة والتشغيل ---
+st.header("الخطوة 2: تشغيل الحسابات")
+
+if st.button("اضغط هنا لبدء معالجة التكاليف"):
+    
+    # التأكد من رفع جميع الملفات
+    if file_employees is not None and file_allocations is not None and file_attendance is not None:
+        
+        try:
+            with st.spinner("...جارٍ معالجة الملفات..."):
+                # --- قراءة الملفات ---
+                df_employees = pd.read_csv(file_employees)
+                df_employees = df_employees[['employee_id', 'Name', 'pay_type', 'daily_rate']]
+                
+                df_attendance = pd.read_csv(file_attendance)
+                df_attendance = df_attendance.dropna(subset=['employee_id'])
+                df_attendance = df_attendance[['employee_id', 'worked_days']]
+                df_attendance['employee_id'] = df_attendance['employee_id'].astype(int)
+
+                # --- معالجة ملف التوزيع (Allocations) ---
+                df_allocations_raw = pd.read_csv(file_allocations, header=1)
+                df_allocations = df_allocations_raw.melt(
+                    id_vars=['employee_id', 'Name'], 
+                    var_name='Project_Code', 
+                    value_name='Allocation_Percentage'
+                )
+                df_allocations = df_allocations.dropna(subset=['Allocation_Percentage'])
+                df_allocations['Allocation_Percentage'] = pd.to_numeric(df_allocations['Allocation_Percentage'], errors='coerce')
+                df_allocations = df_allocations.dropna(subset=['Allocation_Percentage'])
+                df_allocations = df_allocations[['employee_id', 'Project_Code', 'Allocation_Percentage']]
+
+            st.success("✅ تم قراءة جميع الملفات بنجاح.")
+
+            # --- 3. دمج البيانات واحتساب التكاليف ---
+            with st.spinner("...جارٍ احتساب التكاليف وتوزيعها..."):
+                df_main = pd.merge(df_employees, df_attendance, on='employee_id', how='left')
+                df_main['worked_days'] = df_main['worked_days'].fillna(0)
+                df_main['Total_Cost'] = df_main['daily_rate'] * df_main['worked_days']
+
+                # --- 4. دمج التكاليف مع نسب التوزيع ---
+                df_final = pd.merge(df_main, df_allocations, on='employee_id', how='inner')
+                df_final['Cost_For_Project'] = df_final['Total_Cost'] * df_final['Allocation_Percentage']
+
+            st.success("✅ تم احتساب التكاليف الموزعة.")
+            
+            # --- 5. إنشاء التقارير ---
+            with st.spinner("...جارٍ إنشاء التقارير النهائية..."):
+                report_detailed = df_final[[
+                    'employee_id', 'Name', 'Project_Code', 'daily_rate', 
+                    'worked_days', 'Total_Cost', 'Allocation_Percentage', 'Cost_For_Project'
+                ]].sort_values(by=['Name', 'Project_Code'])
+
+                report_summary_project = df_final.groupby('Project_Code')['Cost_For_Project'].sum().reset_index()
+                report_summary_project = report_summary_project.rename(columns={'Cost_For_Project': 'Total_Cost_For_Project'})
+
+                report_summary_employee = df_final.groupby(['employee_id', 'Name'])['Total_Cost'].first().reset_index()
+
+            st.success("✅ تم إنشاء التقارير.")
+
+            # --- 6. عرض التقارير وزر التنزيل ---
+            st.header("الخطوة 3: عرض النتائج وتحميلها")
+            
+            # --- إنشاء ملف Excel في الذاكرة ---
+            output_buffer = io.BytesIO()
+            with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+                report_detailed.to_excel(writer, sheet_name='Detailed_Report', index=False)
+                report_summary_project.to_excel(writer, sheet_name='Summary_By_Project', index=False)
+                report_summary_employee.to_excel(writer, sheet_name='Summary_By_Employee', index=False)
+            
+            # --- زر التنزيل ---
+            st.download_button(
+                label="📥 تنزيل التقرير الكامل (ملف Excel)",
+                data=output_buffer.getvalue(), # .getvalue() للحصول على البيانات من الـ buffer
+                file_name="Cost_Allocation_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+            # --- عرض التقارير في الصفحة ---
+            st.subheader("ملخص التكاليف حسب المشروع")
+            st.dataframe(report_summary_project)
+
+            st.subheader("ملخص التكاليف حسب الموظف")
+            st.dataframe(report_summary_employee)
+
+            st.subheader("التقرير التفصيلي (أول 100 صف)")
+            st.dataframe(report_detailed.head(100))
+
+        except FileNotFoundError as e:
+            st.error(f"❌ خطأ: لم يتم العثور على الملف. {e}")
+        except Exception as e:
+            st.error(f"❌ حدث خطأ غير متوقع: {e}")
+            st.exception(e) # لعرض تفاصيل الخطأ
+    
+    else:
+        st.error("❌ الرجاء التأكد من رفع جميع الملفات الثلاثة أولاً.")
